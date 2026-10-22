@@ -511,7 +511,7 @@ jobs:
     - name: Download addon
       uses: actions/download-artifact@v8
       with:
-        name: addon
+        name: addon-64
         path: release-addon
     - name: Place addon in release dir
       run: |
