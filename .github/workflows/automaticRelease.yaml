@@ -2,14 +2,14 @@ name: automatic-release
 on:
   push:
     branches:
-      - main
-  # schedule:
-  #   # * is a special character in YAML so you have to quote this string
-  #   - cron:  '0 0 * * 6'
+      - '**'
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   l10n:
     name: l10n
+    if: github.ref == 'refs/heads/main'
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
@@ -379,13 +379,107 @@ jobs:
     - name: Upload the addon
       uses: actions/upload-artifact@v7
       with:
-        name: addon
+        name: addon-64
+        path: "*.nvda-addon"
+        compression-level: 0
+        retention-days: 1
+
+  build-32-bit-addon:
+    name: build-32-bit-addon
+    continue-on-error: false
+    needs: [zip-rules, rust-32]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+    # download the 32 build
+    - name: Download 32 bit build
+      uses: actions/download-artifact@v8
+      with:
+        name: libmathcat_py-32-3.11-win.zip
+    # download the Rules dir (not part of checkout)
+    - name: Download 32 bit build
+      uses: actions/download-artifact@v8
+      with:
+        name: Rules.zip
+    - name: Download Rules-minimized.zip
+      uses: actions/download-artifact@v8
+      with:
+        name: Rules-minimized.zip
+    # put things where they belong
+    - name: Set up addons dir
+      run: |
+        unzip libmathcat_py-32-3.11-win.zip
+        mv libmathcat_py.pyd Rules.zip addon/globalPlugins/MathCAT
+        cd addon/globalPlugins/MathCAT
+        sed 's/^import wx\.xrc/# import wx.xrc/' --in-place MathCATgui.py  # fix wx file
+        unzip Rules.zip
+        rm Rules.zip
+    # build the addon
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.11   # needed for scons
+    - name: Install scons dependencies
+      run: |
+        pip install scons markdown
+        sudo apt update
+        sudo apt install gettext
+    - name: Sync addon version from MathCAT (prefer matching branch)
+      shell: bash
+      run: |
+        if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+          REF="$GITHUB_HEAD_REF"
+        else
+          REF="${GITHUB_REF#refs/heads/}"
+        fi
+        echo "Detected ref: $REF"
+        REMOTE=https://github.com/NSoiffer/MathCAT.git
+
+        if git ls-remote --heads "$REMOTE" "$REF" | grep -q "refs/heads/$REF"; then
+          echo "Using MathCAT branch $REF to get version"
+          VERSION=$(curl -fsSL https://raw.githubusercontent.com/NSoiffer/MathCAT/$REF/Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
+        else
+          echo "No matching branch in MathCAT; using latest tag"
+          VERSION=$(curl -fsSL https://raw.githubusercontent.com/NSoiffer/MathCAT/latest/Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
+        fi
+
+        if [ -z "$VERSION" ]; then
+          echo "Failed to read MathCAT version" >&2
+          exit 1
+        fi
+        echo "Syncing addon_version to MathCAT $VERSION"
+        sed -i "s/\"addon_version\": \"[^\"]*\"/\"addon_version\": \"$VERSION\"/" buildVars.py
+    - name: Update NVDA Version Constraints
+      run: |
+        # Adjust the version numbers for the old 32 bit NVDA version
+        sed -i 's/"addon_name": "MathCAT"/"addon_name": "MathCAT-for-NVDA2025"/' buildVars.py
+        sed -i 's/"addon_summary": _("MathCAT:/"addon_summary": _("MathCAT-for-NVDA2025:/' buildVars.py
+        sed -i 's/"addon_minimumNVDAVersion": "[^"]*"/"addon_minimumNVDAVersion": "2025.1"/' buildVars.py
+        sed -i 's/"addon_lastTestedNVDAVersion": "[^"]*"/"addon_lastTestedNVDAVersion": "2025.3"/' buildVars.py
+        cat buildVars.py
+    - name: Run scons to build .addon file
+      run: |
+          scons
+    - name: Rename addon for 32-bit
+      run: |
+        for f in *.nvda-addon; do
+          mv "$f" "${f%.nvda-addon}-32.nvda-addon"
+        done          
+        ls -l *.nvda-addon
+    - name: Upload the addon
+      uses: actions/upload-artifact@v7
+      with:
+        name: addon-32
         path: "*.nvda-addon"
         compression-level: 0
         retention-days: 1
 
   pre-release:
     name: Pre Release
+    if: github.event_name != 'pull_request'
     continue-on-error: false
     needs: [zip-rules, rust-32, rust-64, linux-64, build-addon]
     runs-on: ubuntu-latest
